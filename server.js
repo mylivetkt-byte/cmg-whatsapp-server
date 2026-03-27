@@ -1,3 +1,5 @@
+const { Client, LocalAuth } = require("whatsapp-web.js");
+const qrcode  = require("qrcode");
 const express = require("express");
 const cors    = require("cors");
 const cron    = require("node-cron");
@@ -10,79 +12,76 @@ app.use(cors());
 app.use(express.json());
 
 let client = null;
-let qrCode = null;
+let qrDataUrl = null;
 let status = "disconnected";
-
-function normalizeQR(raw) {
-  if (!raw) return null;
-  if (raw.startsWith("data:image")) return raw;
-  return "data:image/png;base64," + raw;
-}
 
 async function startClient() {
   try {
-    console.log("Cargando wppconnect...");
-    const wppconnect = require("@wppconnect-team/wppconnect");
-    console.log("wppconnect cargado OK");
+    console.log("Iniciando WhatsApp Web...");
 
-    client = await wppconnect.create({
-      session: "cmg-eventos",
-      catchQR: (base64Qr, asciiQR, attempts) => {
-        console.log(`QR generado intento ${attempts}`);
-        qrCode = normalizeQR(base64Qr);
-        status = "qr";
-      },
-      statusFind: (s) => {
-        console.log("Estado:", s);
-        if (s === "isLogged" || s === "inChat") {
-          status = "connected";
-          qrCode = null;
-        }
-        if (s === "notLogged" || s === "browserClose" || s === "desconnectedMobile") {
-          status = "disconnected";
-          qrCode = null;
-          setTimeout(startClient, 20000);
-        }
-      },
-      headless: "new",
-      logQR: false,
-      browserArgs: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--no-zygote",
-        "--disable-gpu",
-        "--disable-extensions",
-      ],
-      puppeteerOptions: {
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser",
+    client = new Client({
+      authStrategy: new LocalAuth({ clientId: "cmg-eventos" }),
+      puppeteer: {
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/google-chrome-stable",
+        headless: true,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
+          "--disable-accelerated-2d-canvas",
+          "--no-first-run",
+          "--no-zygote",
           "--disable-gpu",
+          "--single-process",
         ],
       },
-      folderNameToken: "tokens",
-      mkdirFolderToken: true,
-      disableWelcome: true,
-      updatesLog: false,
     });
 
-    status = "connected";
-    qrCode = null;
-    console.log("✅ WhatsApp conectado");
+    client.on("qr", async (qr) => {
+      console.log("QR recibido, generando imagen...");
+      try {
+        qrDataUrl = await qrcode.toDataURL(qr);
+        status = "qr";
+        console.log("QR listo en /qr");
+      } catch (e) {
+        console.error("Error generando QR imagen:", e.message);
+      }
+    });
+
+    client.on("ready", () => {
+      console.log("✅ WhatsApp conectado");
+      status = "connected";
+      qrDataUrl = null;
+    });
+
+    client.on("authenticated", () => {
+      console.log("Autenticado correctamente");
+      status = "connected";
+    });
+
+    client.on("auth_failure", (msg) => {
+      console.error("Error de autenticación:", msg);
+      status = "disconnected";
+      setTimeout(startClient, 20000);
+    });
+
+    client.on("disconnected", (reason) => {
+      console.log("Desconectado:", reason);
+      status = "disconnected";
+      qrDataUrl = null;
+      setTimeout(startClient, 20000);
+    });
+
+    await client.initialize();
 
   } catch (err) {
-    console.error("Error WPPConnect:", err.message);
+    console.error("Error iniciando cliente:", err.message);
     status = "disconnected";
     setTimeout(startClient, 30000);
   }
 }
 
-// Ping para no dormirse
+// Ping cada 14 min para no dormirse en Render
 cron.schedule("*/14 * * * *", async () => {
   try {
     const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -91,33 +90,36 @@ cron.schedule("*/14 * * * *", async () => {
   } catch (_) {}
 });
 
+// ── Rutas ─────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ ok: true, status, time: new Date().toISOString() }));
 app.get("/status", (req, res) => res.json({ status, connected: status === "connected" }));
 
 app.get("/qr-base64", (req, res) => {
   if (status === "connected") return res.json({ connected: true, qr: null });
-  if (!qrCode)               return res.json({ connected: false, qr: null, status });
-  res.json({ connected: false, qr: qrCode, status });
+  if (!qrDataUrl)             return res.json({ connected: false, qr: null, status });
+  res.json({ connected: false, qr: qrDataUrl, status });
 });
 
 app.get("/qr", (req, res) => {
   if (status === "connected") {
     return res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0faf5">
       <h2 style="color:#16a34a">✅ WhatsApp conectado</h2>
+      <p>El servidor está listo para enviar mensajes.</p>
       <script>setTimeout(()=>location.reload(),15000)</script>
     </body></html>`);
   }
-  if (!qrCode) {
+  if (!qrDataUrl) {
     return res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px">
-      <h2>⏳ Generando QR... estado: ${status}</h2>
-      <p>Recarga en unos segundos</p>
+      <h2>⏳ Generando QR... (estado: ${status})</h2>
+      <p>Espera unos segundos y recarga</p>
       <script>setTimeout(()=>location.reload(),5000)</script>
     </body></html>`);
   }
   res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0faf5">
     <h2 style="color:#005537">📱 Escanea con WhatsApp</h2>
-    <p>WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
-    <img src="${qrCode}" style="width:280px;height:280px;border:4px solid #16a34a;border-radius:12px;margin:20px auto;display:block">
+    <p style="color:#555">WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+    <img src="${qrDataUrl}" style="width:280px;height:280px;border:4px solid #16a34a;border-radius:12px;margin:20px auto;display:block">
+    <p style="color:#999;font-size:13px">Se recarga cada 8 segundos</p>
     <script>setTimeout(()=>location.reload(),8000)</script>
   </body></html>`);
 });
@@ -135,7 +137,8 @@ app.post("/send", async (req, res) => {
   try {
     let number = String(phone).replace(/\D/g, "");
     if (number.startsWith("3") && number.length === 10) number = "57" + number;
-    await client.sendText(`${number}@c.us`, message);
+    const chatId = `${number}@c.us`;
+    await client.sendMessage(chatId, message);
     console.log(`✅ Enviado a ${number}`);
     res.json({ success: true, to: number });
   } catch (err) {
@@ -144,9 +147,8 @@ app.post("/send", async (req, res) => {
   }
 });
 
-// Arrancar servidor PRIMERO, luego WhatsApp en segundo plano
+// Arrancar Express primero, luego WhatsApp
 app.listen(PORT, () => {
   console.log(`🚀 Servidor en puerto ${PORT}`);
-  // Delay de 3s para que Render registre el puerto antes de iniciar Chromium
   setTimeout(startClient, 3000);
 });
