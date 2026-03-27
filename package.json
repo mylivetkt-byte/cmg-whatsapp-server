@@ -1,0 +1,15 @@
+{
+  "name": "whatsapp-server",
+  "version": "1.0.0",
+  "description": "WhatsApp server for CMG Eventos",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@wppconnect-team/wppconnect": "^1.30.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "node-cron": "^3.0.3"
+  }
+}

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: cmg-whatsapp
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: API_TOKEN
+        value: cmg-token-2024
+      - key: NODE_ENV
+        value: production
