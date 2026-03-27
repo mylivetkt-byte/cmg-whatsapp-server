@@ -84,6 +84,13 @@ app.get("/health", (req, res) => {
   res.json({ status, ok: true, time: new Date().toISOString() });
 });
 
+// QR como base64 JSON (para el panel admin)
+app.get("/qr-base64", (req, res) => {
+  if (status === "connected") return res.json({ connected: true, qr: null });
+  if (!qrCode) return res.json({ connected: false, qr: null });
+  res.json({ connected: false, qr: qrCode });
+});
+
 // Ver QR para escanear
 app.get("/qr", (req, res) => {
   if (status === "connected") {
