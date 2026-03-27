@@ -1,8 +1,14 @@
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const qrcode  = require("qrcode");
 const express = require("express");
 const cors    = require("cors");
 const cron    = require("node-cron");
+const qrcode  = require("qrcode");
+const pino    = require("pino");
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+} = require("@whiskeysockets/baileys");
 
 const app   = express();
 const PORT  = process.env.PORT || 3000;
@@ -11,77 +17,67 @@ const TOKEN = process.env.API_TOKEN || "cmg-token-2024";
 app.use(cors());
 app.use(express.json());
 
-let client = null;
+let sock      = null;
 let qrDataUrl = null;
-let status = "disconnected";
+let status    = "disconnected"; // disconnected | qr | connected
+
+const logger = pino({ level: "silent" }); // silenciar logs de baileys
 
 async function startClient() {
   try {
-    console.log("Iniciando WhatsApp Web...");
+    console.log("Iniciando Baileys (sin Chrome)...");
 
-    client = new Client({
-      authStrategy: new LocalAuth({ clientId: "cmg-eventos" }),
-      puppeteer: {
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/google-chrome-stable",
-        headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-accelerated-2d-canvas",
-          "--no-first-run",
-          "--no-zygote",
-          "--disable-gpu",
-          "--single-process",
-        ],
-      },
+    const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+    const { version } = await fetchLatestBaileysVersion();
+
+    sock = makeWASocket({
+      version,
+      auth: state,
+      logger,
+      printQRInTerminal: false,
+      browser: ["CMG Eventos", "Chrome", "1.0.0"],
     });
 
-    client.on("qr", async (qr) => {
-      console.log("QR recibido, generando imagen...");
-      try {
-        qrDataUrl = await qrcode.toDataURL(qr);
-        status = "qr";
-        console.log("QR listo en /qr");
-      } catch (e) {
-        console.error("Error generando QR imagen:", e.message);
+    sock.ev.on("creds.update", saveCreds);
+
+    sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+      if (qr) {
+        console.log("QR recibido, generando imagen...");
+        try {
+          qrDataUrl = await qrcode.toDataURL(qr);
+          status = "qr";
+          console.log("QR listo en /qr");
+        } catch (e) {
+          console.error("Error generando QR:", e.message);
+        }
+      }
+
+      if (connection === "open") {
+        console.log("✅ WhatsApp conectado con Baileys");
+        status = "connected";
+        qrDataUrl = null;
+      }
+
+      if (connection === "close") {
+        const code = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = code !== DisconnectReason.loggedOut;
+        console.log("Desconectado, código:", code, "— Reconectar:", shouldReconnect);
+        status = "disconnected";
+        qrDataUrl = null;
+        if (shouldReconnect) {
+          setTimeout(startClient, 5000);
+        }
       }
     });
 
-    client.on("ready", () => {
-      console.log("✅ WhatsApp conectado");
-      status = "connected";
-      qrDataUrl = null;
-    });
-
-    client.on("authenticated", () => {
-      console.log("Autenticado correctamente");
-      status = "connected";
-    });
-
-    client.on("auth_failure", (msg) => {
-      console.error("Error de autenticación:", msg);
-      status = "disconnected";
-      setTimeout(startClient, 20000);
-    });
-
-    client.on("disconnected", (reason) => {
-      console.log("Desconectado:", reason);
-      status = "disconnected";
-      qrDataUrl = null;
-      setTimeout(startClient, 20000);
-    });
-
-    await client.initialize();
-
   } catch (err) {
-    console.error("Error iniciando cliente:", err.message);
+    console.error("Error Baileys:", err.message);
     status = "disconnected";
     setTimeout(startClient, 30000);
   }
 }
 
-// Ping cada 14 min para no dormirse en Render
+// Ping para no dormirse en Render
 cron.schedule("*/14 * * * *", async () => {
   try {
     const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -110,7 +106,7 @@ app.get("/qr", (req, res) => {
   }
   if (!qrDataUrl) {
     return res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px">
-      <h2>⏳ Generando QR... (estado: ${status})</h2>
+      <h2>⏳ Iniciando... (estado: ${status})</h2>
       <p>Espera unos segundos y recarga</p>
       <script>setTimeout(()=>location.reload(),5000)</script>
     </body></html>`);
@@ -127,7 +123,7 @@ app.get("/qr", (req, res) => {
 app.post("/send", async (req, res) => {
   if (req.headers["authorization"] !== `Bearer ${TOKEN}`)
     return res.status(401).json({ error: "No autorizado" });
-  if (status !== "connected" || !client)
+  if (status !== "connected" || !sock)
     return res.status(503).json({ error: "WhatsApp no conectado", status });
 
   const { phone, message } = req.body;
@@ -137,8 +133,8 @@ app.post("/send", async (req, res) => {
   try {
     let number = String(phone).replace(/\D/g, "");
     if (number.startsWith("3") && number.length === 10) number = "57" + number;
-    const chatId = `${number}@c.us`;
-    await client.sendMessage(chatId, message);
+    const jid = `${number}@s.whatsapp.net`;
+    await sock.sendMessage(jid, { text: message });
     console.log(`✅ Enviado a ${number}`);
     res.json({ success: true, to: number });
   } catch (err) {
@@ -147,8 +143,8 @@ app.post("/send", async (req, res) => {
   }
 });
 
-// Arrancar Express primero, luego WhatsApp
+// Arrancar Express primero, luego Baileys
 app.listen(PORT, () => {
   console.log(`🚀 Servidor en puerto ${PORT}`);
-  setTimeout(startClient, 3000);
+  setTimeout(startClient, 2000);
 });
