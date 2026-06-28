@@ -89,6 +89,21 @@ cron.schedule("*/14 * * * *", async () => {
 });
 
 // ── Rutas ────────────────────────────────────────────────────────────[...]
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    status,
+    message: "CMG WhatsApp Server",
+    endpoints: {
+      health: "/health",
+      status: "/status",
+      qr: "/qr",
+      qrBase64: "/qr-base64",
+      send: "POST /send"
+    }
+  });
+});
+
 app.get("/health", (req, res) => res.json({ ok: true, status, time: new Date().toISOString() }));
 app.get("/status", (req, res) => res.json({ status, connected: status === "connected" }));
 
