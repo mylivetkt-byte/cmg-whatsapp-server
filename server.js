@@ -25,7 +25,7 @@ const logger = pino({ level: "silent" }); // silenciar logs de baileys
 
 async function startClient() {
   try {
-    console.log("Iniciando Baileys 7.0...");
+    console.log("Iniciando Baileys 6.7.9...");
 
     const { state, saveCreds } = await useMultiFileAuthState("auth_info");
     const { version } = await fetchLatestBaileysVersion();
@@ -40,9 +40,7 @@ async function startClient() {
 
     sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-      
+    sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
       if (qr) {
         console.log("QR recibido, generando imagen...");
         try {
@@ -55,7 +53,7 @@ async function startClient() {
       }
 
       if (connection === "open") {
-        console.log("✅ WhatsApp conectado con Baileys 7.0");
+        console.log("✅ WhatsApp conectado con Baileys 6.7.9");
         status = "connected";
         qrDataUrl = null;
       }
@@ -88,7 +86,7 @@ cron.schedule("*/14 * * * *", async () => {
   } catch (_) {}
 });
 
-// ── Rutas ────────────────────────────────────────────────────────────[...]
+// ── Rutas ────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
     ok: true,
