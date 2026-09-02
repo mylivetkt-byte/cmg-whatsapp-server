@@ -21,9 +21,9 @@ let sock      = null;
 let qrDataUrl = null;
 let status    = "disconnected"; // disconnected | qr | connected
 
-// Almacén en memoria de conversaciones y mensajes entrantes/salientes
-const chats = new Map(); // phone -> { phone, name, lastMessage, timestamp, unread }
-const messageStore = []; // Array de mensajes para historial
+// Almacén en memoria de conversaciones y mensajes
+const chatsMap = new Map(); // phone -> { id, name, lastMessage, timestamp, unreadCount }
+const messageStore = [];    // Array de mensajes: { id, phone, fromMe, body, text, timestamp }
 
 const logger = pino({ level: "silent" }); // silenciar logs pesados de baileys
 
@@ -75,13 +75,13 @@ async function startClient() {
       }
     });
 
-    // 2. 📩 RECEPTOR DE MENSAJES ENTRANTES (RECEPTOR COMPLETO)
+    // 2. 📩 RECEPTOR DE MENSAJES ENTRANTES Y SALIENTES
     sock.ev.on("messages.upsert", async ({ messages: newMessages, type }) => {
       try {
         if (type !== "notify") return;
         const msg = newMessages[0];
 
-        // Ignorar si no hay contenido o es mensaje de grupo
+        // Ignorar mensajes sin contenido o de grupos
         if (!msg || !msg.message || msg.key.remoteJid.endsWith("@g.us")) return;
 
         const senderJid = msg.key.remoteJid;
@@ -96,33 +96,34 @@ async function startClient() {
           msg.message?.extendedTextMessage?.text ||
           msg.message?.imageMessage?.caption ||
           msg.message?.documentMessage?.caption ||
-          (msg.message?.imageMessage ? "[Imagen]" : msg.message?.documentMessage ? "[Documento PDF]" : "[Mensaje de audio]");
+          (msg.message?.imageMessage ? "[Imagen]" : msg.message?.documentMessage ? "[Documento PDF]" : "[Mensaje]");
 
         const contactName = msg.pushName || senderPhone;
-        const timestamp = new Date().toISOString();
+        const nowTs = Math.floor(Date.now() / 1000);
 
         console.log(`📩 [${isFromMe ? "ENVIADO" : "RECIBIDO"}] ${senderPhone}: "${incomingText}"`);
 
         const msgObj = {
-          id: msg.key.id,
+          id: msg.key.id || `msg-${Date.now()}`,
           phone: senderPhone,
-          name: contactName,
           fromMe: isFromMe,
+          body: incomingText,
           text: incomingText,
-          timestamp,
+          timestamp: nowTs,
         };
 
         // Guardar mensaje en el almacén de mensajes
         messageStore.push(msgObj);
-        if (messageStore.length > 2000) messageStore.shift(); // Límite en memoria
+        if (messageStore.length > 2000) messageStore.shift();
 
-        // Actualizar tabla de chats activos
-        chats.set(senderPhone, {
-          phone: senderPhone,
+        // Actualizar conversación en el mapa de chats
+        const existing = chatsMap.get(senderPhone) || {};
+        chatsMap.set(senderPhone, {
+          id: senderPhone,
           name: contactName,
           lastMessage: incomingText,
-          timestamp,
-          unread: isFromMe ? 0 : ((chats.get(senderPhone)?.unread || 0) + 1),
+          timestamp: nowTs,
+          unreadCount: isFromMe ? 0 : ((existing.unreadCount || 0) + 1),
         });
 
       } catch (err) {
@@ -137,7 +138,7 @@ async function startClient() {
   }
 }
 
-// Ping automático para evitar suspensión en Render
+// Ping automático para no dormirse en Render
 cron.schedule("*/14 * * * *", async () => {
   try {
     const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -151,14 +152,14 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     status,
-    message: "CMG WhatsApp Server (Servidor Receptor y Emisor Conectado)",
+    message: "CMG WhatsApp Server",
     endpoints: {
       health: "/health",
       status: "/status",
       qr: "/qr",
       qrBase64: "/qr-base64",
-      chats: "/chats",
-      messages: "/messages?phone=57300...",
+      chats: "GET /chats",
+      messages: "GET /chats/:id/messages o GET /messages?phone=...",
       send: "POST /send (phone, message, mediaUrl)",
       presence: "POST /presence (phone, state)"
     }
@@ -198,25 +199,37 @@ app.get("/qr", (req, res) => {
   </body></html>`);
 });
 
-// 📥 ENDPOINT PARA OBTENER CHATS ACTIVOS
+// 📥 ENDPOINT PARA CHATS (RETORNA ARRAY DIRECTO Y OBJETO PARA COMPATIBILIDAD TOTAL)
 app.get("/chats", (req, res) => {
-  const chatList = Array.from(chats.values()).sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  const chatList = Array.from(chatsMap.values()).sort(
+    (a, b) => (b.timestamp || 0) - (a.timestamp || 0)
   );
-  res.json({ ok: true, count: chatList.length, chats: chatList });
+  // Devuelve array directo
+  res.json(chatList);
 });
 
-// 📥 ENDPOINT PARA OBTENER HISTORIAL DE MENSAJES DE UN NÚMERO
+// 📥 ENDPOINT DE MENSAJES POR CHAT ID (`/chats/:id/messages`)
+app.get("/chats/:id/messages", (req, res) => {
+  let chatId = String(req.params.id || "").replace(/\D/g, "");
+  const filtered = messageStore.filter(
+    (m) => m.phone.endsWith(chatId) || chatId.endsWith(m.phone)
+  );
+  res.json(filtered);
+});
+
+// 📥 ENDPOINT DE MENSAJES POR PHONE QUERY (`/messages?phone=...`)
 app.get("/messages", (req, res) => {
   const { phone } = req.query;
   if (!phone) return res.status(400).json({ error: "Falta parámetro phone" });
   let cleanPhone = String(phone).replace(/\D/g, "");
 
-  const filtered = messageStore.filter((m) => m.phone.endsWith(cleanPhone) || cleanPhone.endsWith(m.phone));
-  res.json({ ok: true, phone: cleanPhone, messages: filtered });
+  const filtered = messageStore.filter(
+    (m) => m.phone.endsWith(cleanPhone) || cleanPhone.endsWith(m.phone)
+  );
+  res.json(filtered);
 });
 
-// 📤 ENDPOINT PARA ENVIAR MENSAJES (SOPORTA TEXTO Y MEDIA PDF/IMAGEN)
+// 📤 ENDPOINT PARA ENVIAR MENSAJES (TEXTO Y MEDIA PDF/IMAGEN)
 app.post("/send", async (req, res) => {
   if (req.headers["authorization"] !== `Bearer ${TOKEN}`)
     return res.status(401).json({ error: "No autorizado" });
@@ -232,23 +245,45 @@ app.post("/send", async (req, res) => {
     if (number.startsWith("3") && number.length === 10) number = "57" + number;
     const jid = `${number}@s.whatsapp.net`;
 
+    let sentMsg;
     if (mediaUrl) {
       if (mediaUrl.includes(".pdf") || mediaUrl.startsWith("data:application/pdf")) {
-        await sock.sendMessage(jid, {
+        sentMsg = await sock.sendMessage(jid, {
           document: { url: mediaUrl },
           mimetype: "application/pdf",
           fileName: "Documento_Evento.pdf",
           caption: message || "",
         });
       } else {
-        await sock.sendMessage(jid, {
+        sentMsg = await sock.sendMessage(jid, {
           image: { url: mediaUrl },
           caption: message || "",
         });
       }
     } else {
-      await sock.sendMessage(jid, { text: message });
+      sentMsg = await sock.sendMessage(jid, { text: message });
     }
+
+    const nowTs = Math.floor(Date.now() / 1000);
+    const msgText = message || (mediaUrl ? "[Archivo Adjunto]" : "");
+
+    // Registrar mensaje enviado en el almacén local
+    messageStore.push({
+      id: sentMsg?.key?.id || `sent-${Date.now()}`,
+      phone: number,
+      fromMe: true,
+      body: msgText,
+      text: msgText,
+      timestamp: nowTs,
+    });
+
+    chatsMap.set(number, {
+      id: number,
+      name: number,
+      lastMessage: msgText,
+      timestamp: nowTs,
+      unreadCount: 0,
+    });
 
     console.log(`✅ Enviado a ${number}`);
     res.json({ success: true, to: number });
