@@ -23,7 +23,7 @@ let status    = "disconnected"; // disconnected | qr | connected
 
 // Almacén en memoria de conversaciones y mensajes
 const chatsMap = new Map(); // phone -> { id, name, lastMessage, timestamp, unreadCount }
-const messageStore = [];    // Array de mensajes: { id, phone, fromMe, body, text, timestamp }
+const messageStore = [];    // Array de mensajes: { id, phone, name, fromMe, body, text, timestamp }
 
 const logger = pino({ level: "silent" }); // silenciar logs pesados de baileys
 
@@ -101,11 +101,12 @@ async function startClient() {
         const contactName = msg.pushName || senderPhone;
         const nowTs = Math.floor(Date.now() / 1000);
 
-        console.log(`📩 [${isFromMe ? "ENVIADO" : "RECIBIDO"}] ${senderPhone}: "${incomingText}"`);
+        console.log(`📩 [${isFromMe ? "ENVIADO" : "RECIBIDO"}] ${senderPhone} (${contactName}): "${incomingText}"`);
 
         const msgObj = {
           id: msg.key.id || `msg-${Date.now()}`,
           phone: senderPhone,
+          name: contactName,
           fromMe: isFromMe,
           body: incomingText,
           text: incomingText,
@@ -116,15 +117,21 @@ async function startClient() {
         messageStore.push(msgObj);
         if (messageStore.length > 2000) messageStore.shift();
 
-        // Actualizar conversación en el mapa de chats
-        const existing = chatsMap.get(senderPhone) || {};
-        chatsMap.set(senderPhone, {
+        // Actualizar conversación en el mapa de chats (clave tanto por teléfono como por nombre si aplica)
+        const existing = chatsMap.get(senderPhone) || chatsMap.get(contactName) || {};
+        const chatData = {
           id: senderPhone,
+          phone: senderPhone,
           name: contactName,
           lastMessage: incomingText,
           timestamp: nowTs,
           unreadCount: isFromMe ? 0 : ((existing.unreadCount || 0) + 1),
-        });
+        };
+
+        chatsMap.set(senderPhone, chatData);
+        if (contactName && contactName !== senderPhone) {
+          chatsMap.set(contactName, chatData);
+        }
 
       } catch (err) {
         console.error("Error al procesar mensaje entrante:", err.message);
@@ -199,21 +206,39 @@ app.get("/qr", (req, res) => {
   </body></html>`);
 });
 
-// 📥 ENDPOINT PARA CHATS (RETORNA ARRAY DIRECTO Y OBJETO PARA COMPATIBILIDAD TOTAL)
+// 📥 ENDPOINT PARA CHATS (RETORNA ARRAY DIRECTO Y ELIMINA DUPLICADOS POR NOMBRE)
 app.get("/chats", (req, res) => {
-  const chatList = Array.from(chatsMap.values()).sort(
+  const uniqueChats = new Map();
+  Array.from(chatsMap.values()).forEach((c) => {
+    uniqueChats.set(c.id, c);
+  });
+
+  const chatList = Array.from(uniqueChats.values()).sort(
     (a, b) => (b.timestamp || 0) - (a.timestamp || 0)
   );
-  // Devuelve array directo
   res.json(chatList);
 });
 
 // 📥 ENDPOINT DE MENSAJES POR CHAT ID (`/chats/:id/messages`)
 app.get("/chats/:id/messages", (req, res) => {
-  let chatId = String(req.params.id || "").replace(/\D/g, "");
-  const filtered = messageStore.filter(
-    (m) => m.phone.endsWith(chatId) || chatId.endsWith(m.phone)
-  );
+  const rawId = String(req.params.id || "").trim();
+  const cleanId = rawId.replace(/\D/g, "");
+
+  const filtered = messageStore.filter((m) => {
+    if (!cleanId) {
+      return (
+        m.phone.toLowerCase() === rawId.toLowerCase() ||
+        (m.name && m.name.toLowerCase() === rawId.toLowerCase())
+      );
+    }
+    const mDigits = m.phone.replace(/\D/g, "");
+    return (
+      (mDigits && (mDigits.endsWith(cleanId) || cleanId.endsWith(mDigits))) ||
+      m.phone.toLowerCase() === rawId.toLowerCase() ||
+      (m.name && m.name.toLowerCase() === rawId.toLowerCase())
+    );
+  });
+
   res.json(filtered);
 });
 
@@ -221,11 +246,25 @@ app.get("/chats/:id/messages", (req, res) => {
 app.get("/messages", (req, res) => {
   const { phone } = req.query;
   if (!phone) return res.status(400).json({ error: "Falta parámetro phone" });
-  let cleanPhone = String(phone).replace(/\D/g, "");
 
-  const filtered = messageStore.filter(
-    (m) => m.phone.endsWith(cleanPhone) || cleanPhone.endsWith(m.phone)
-  );
+  const rawId = String(phone).trim();
+  const cleanId = rawId.replace(/\D/g, "");
+
+  const filtered = messageStore.filter((m) => {
+    if (!cleanId) {
+      return (
+        m.phone.toLowerCase() === rawId.toLowerCase() ||
+        (m.name && m.name.toLowerCase() === rawId.toLowerCase())
+      );
+    }
+    const mDigits = m.phone.replace(/\D/g, "");
+    return (
+      (mDigits && (mDigits.endsWith(cleanId) || cleanId.endsWith(mDigits))) ||
+      m.phone.toLowerCase() === rawId.toLowerCase() ||
+      (m.name && m.name.toLowerCase() === rawId.toLowerCase())
+    );
+  });
+
   res.json(filtered);
 });
 
@@ -271,6 +310,7 @@ app.post("/send", async (req, res) => {
     messageStore.push({
       id: sentMsg?.key?.id || `sent-${Date.now()}`,
       phone: number,
+      name: number,
       fromMe: true,
       body: msgText,
       text: msgText,
@@ -279,6 +319,7 @@ app.post("/send", async (req, res) => {
 
     chatsMap.set(number, {
       id: number,
+      phone: number,
       name: number,
       lastMessage: msgText,
       timestamp: nowTs,
