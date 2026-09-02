@@ -27,6 +27,32 @@ const messageStore = [];    // Array de mensajes: { id, phone, name, fromMe, bod
 
 const logger = pino({ level: "silent" }); // silenciar logs pesados de baileys
 
+// 🤖 MOTOR IA SERVIDOR - Respuestas automáticas 24/7
+function getBotResponse(text) {
+  if (!text) return null;
+  const clean = text.toLowerCase().trim();
+
+  if (clean === "1" || clean.includes("confirmar") || clean.includes("asistir")) {
+    return "✅ ¡Excelente! Tu asistencia ha sido confirmada con éxito. Te esperamos en el evento.";
+  }
+  if (clean === "2" || clean.includes("cancelar") || clean.includes("no puedo")) {
+    return "ℹ️ Entendido. Hemos registrado tu respuesta. Lamentamos que no puedas acompañarnos.";
+  }
+  if (clean.includes("fecha") || clean.includes("hora") || clean.includes("cuando")) {
+    return "📅 El evento se llevará a cabo según el horario programado en el auditorio central. ¡Te esperamos!";
+  }
+  if (clean.includes("donde") || clean.includes("lugar") || clean.includes("ubicacion") || clean.includes("direccion")) {
+    return "📍 Ubicación: Auditorio Central de la Sede Principal. Por favor llega 15 minutos antes.";
+  }
+  if (clean.includes("qr") || clean.includes("pase") || clean.includes("entrada") || clean.includes("ticket")) {
+    return "🎟️ Puedes presentar tu Pase QR o código de registro en la entrada del evento.";
+  }
+  if (clean.includes("hola") || clean.includes("buenas") || clean.includes("menu")) {
+    return "👋 ¡Hola! Soy el Asistente Virtual Inteligente IA de Doxa Eventos. ¿En qué te puedo ayudar hoy?\n\n1️⃣ Responde '1' para Confirmar Asistencia\n2️⃣ Responde '2' para Cancelar\n3️⃣ Escribe 'fecha', 'ubicación' o 'qr'";
+  }
+  return null;
+}
+
 async function startClient() {
   try {
     console.log("Iniciando Baileys 6.7.9...");
@@ -75,7 +101,7 @@ async function startClient() {
       }
     });
 
-    // 2. 📩 RECEPTOR DE MENSAJES ENTRANTES Y SALIENTES
+    // 2. 📩 RECEPTOR DE MENSAJES ENTRANTES Y AUTO-RESPUESTA DEL CHATBOT IA
     sock.ev.on("messages.upsert", async ({ messages: newMessages, type }) => {
       try {
         if (type !== "notify") return;
@@ -113,11 +139,11 @@ async function startClient() {
           timestamp: nowTs,
         };
 
-        // Guardar mensaje en el almacén de mensajes
+        // Guardar mensaje en memoria
         messageStore.push(msgObj);
         if (messageStore.length > 2000) messageStore.shift();
 
-        // Actualizar conversación en el mapa de chats (clave tanto por teléfono como por nombre si aplica)
+        // Actualizar conversación
         const existing = chatsMap.get(senderPhone) || chatsMap.get(contactName) || {};
         const chatData = {
           id: senderPhone,
@@ -131,6 +157,40 @@ async function startClient() {
         chatsMap.set(senderPhone, chatData);
         if (contactName && contactName !== senderPhone) {
           chatsMap.set(contactName, chatData);
+        }
+
+        // 🤖 SI ES UN MENSAJE ENTRANTE DEL USUARIO, PROCESAR Y ENVIAR RESPUESTA VÍA WHATSAPP REAL
+        if (!isFromMe) {
+          const autoReply = getBotResponse(incomingText);
+          if (autoReply) {
+            console.log(`🤖 Chatbot respondiendo a ${senderPhone}: "${autoReply}"`);
+            
+            // Simular estado "escribiendo..." anti-baneo
+            await sock.sendPresenceUpdate("composing", senderJid);
+            await new Promise((r) => setTimeout(r, 1500));
+
+            // Enviar mensaje de respuesta por WhatsApp
+            const botSent = await sock.sendMessage(senderJid, { text: autoReply });
+
+            // Registrar mensaje del bot en el historial local
+            const botTs = Math.floor(Date.now() / 1000);
+            messageStore.push({
+              id: botSent?.key?.id || `bot-${Date.now()}`,
+              phone: senderPhone,
+              name: contactName,
+              fromMe: true,
+              body: autoReply,
+              text: autoReply,
+              timestamp: botTs,
+            });
+
+            chatsMap.set(senderPhone, {
+              ...chatData,
+              lastMessage: autoReply,
+              timestamp: botTs,
+              unreadCount: 0,
+            });
+          }
         }
 
       } catch (err) {
@@ -159,7 +219,7 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     status,
-    message: "CMG WhatsApp Server",
+    message: "CMG WhatsApp Server (Motor IA Conectado 24/7)",
     endpoints: {
       health: "/health",
       status: "/status",
@@ -186,7 +246,7 @@ app.get("/qr", (req, res) => {
   if (status === "connected") {
     return res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0faf5">
       <h2 style="color:#16a34a">✅ WhatsApp conectado</h2>
-      <p>El servidor está listo para recibir y enviar mensajes.</p>
+      <p>El servidor está listo para recibir y enviar mensajes con Chatbot IA 24/7.</p>
       <script>setTimeout(()=>location.reload(),15000)</script>
     </body></html>`);
   }
@@ -206,7 +266,7 @@ app.get("/qr", (req, res) => {
   </body></html>`);
 });
 
-// 📥 ENDPOINT PARA CHATS (RETORNA ARRAY DIRECTO Y ELIMINA DUPLICADOS POR NOMBRE)
+// 📥 ENDPOINT PARA CHATS
 app.get("/chats", (req, res) => {
   const uniqueChats = new Map();
   Array.from(chatsMap.values()).forEach((c) => {
